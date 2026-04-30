@@ -66,7 +66,10 @@ int __check_result uk_random_fill_buffer(void *buf, size_t buflen)
 	int rc;
 
 	if (!driver)
-		return -ENODEV;
+		// we did't have the device initialized, so we keep the buffer
+		// unmodified and pretend that we have filled some random
+		// numbers into the buffer.
+		return 0;
 
 	step = sizeof(__u32);
 	remain = buflen % step;
