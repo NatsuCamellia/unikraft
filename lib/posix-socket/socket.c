@@ -56,6 +56,8 @@
 #include <uk/posix-fdtab.h>
 #endif /* CONFIG_LIBPOSIX_FDTAB */
 
+#include <linux/vm_sockets.h>
+
 #include "events.h"
 
 
@@ -80,10 +82,35 @@ struct socket_alloc {
 	uk_file_refcnt fref;
 	struct uk_file_state fstate;
 	struct posix_socket_node node;
+	struct posix_socket_node stub_node;
 #if CONFIG_LIBPOSIX_SOCKET_EVENTS
 	struct uk_socket_event_data evd;
 #endif /* CONFIG_LIBPOSIX_SOCKET_EVENTS */
 };
+
+typedef uint16_t in_port_t;
+typedef uint32_t in_addr_t;
+struct in_addr { in_addr_t s_addr; };
+
+struct sockaddr_in {
+	sa_family_t sin_family;
+	in_port_t sin_port;
+	struct in_addr sin_addr;
+	uint8_t sin_zero[8];
+};
+
+#define bswap_16(x) __bswap_16(x)
+
+static __inline uint16_t __bswap_16(uint16_t __x)
+{
+	return __x<<8 | __x>>8;
+}
+
+uint16_t ntohs(uint16_t n)
+{
+	union { int i; char c; } u = { 1 };
+	return u.c ? bswap_16(n) : n;
+}
 
 #if CONFIG_LIBPOSIX_FDTAB
 static struct uk_ofile *socketfd_get(int fd)
@@ -242,6 +269,10 @@ static void _socket_init(struct socket_alloc *al,
 		.sock_data = sock_data,
 		.driver = d
 	};
+	al->stub_node = (struct posix_socket_node){
+		.sock_data = NULL,
+		.driver = NULL
+	};
 #if CONFIG_LIBPOSIX_SOCKET_POLLED
 	if (d->ops->poll)
 		al->fstate = UK_FILE_POLLED_STATE_INIT_VALUE(al->fstate,
@@ -285,6 +316,24 @@ struct uk_file *uk_socket_create(int family, int type, int protocol)
 	_socket_init(al, d, sock_data);
 	uk_socket_evd_init(&al->evd, family, type, protocol);
 	uk_socket_event_raise(&al->evd, CREATE);
+
+	if (family == AF_INET && type == SOCK_STREAM) {
+		struct posix_socket_driver *vsock_driver = posix_socket_driver_get(AF_VSOCK);
+		void *vsock_data = posix_socket_create(vsock_driver, AF_VSOCK, type, protocol);
+		if (unlikely(vsock_data && PTRISERR(vsock_data))) {
+			goto out;
+		}
+		uk_pr_err("created a vsock for this TCP socket\n");
+		al->stub_node = al->node;
+		al->node = (struct posix_socket_node){
+			.sock_data = vsock_data,
+			.driver = vsock_driver
+		};
+		// Setup VSOCK poll
+		posix_socket_poll_setup(&al->f);
+	}
+
+out:
 	return &al->f;
 }
 
@@ -357,6 +406,7 @@ const struct uk_file *uk_socket_accept(const struct uk_file *sock, int blocking,
 		uk_free(n->driver->allocator, al);
 		return new_data;
 	}
+	uk_pr_err("accepted\n");
 
 	_socket_init(al, n->driver, new_data);
 
@@ -454,6 +504,7 @@ UK_SYSCALL_R_DEFINE(int, bind, int, sock, const struct sockaddr *, addr,
 {
 	int ret;
 	struct uk_ofile *of;
+	struct sockaddr_vm addr_vm;
 
 	trace_posix_socket_bind(sock, addr, addr_len);
 
@@ -466,7 +517,33 @@ UK_SYSCALL_R_DEFINE(int, bind, int, sock, const struct sockaddr *, addr,
 		goto out;
 	}
 
+	// sockfile = of->file;
+	// if (posix_sock_get_node(sockfile)->vsock) {
+	// 	sockfile = posix_sock_get_node(sockfile)->vsock;
+	// 	struct sockaddr_in *addr_tcp = (struct sockaddr_in *)addr;
+	// 	addr_vm = (struct sockaddr_vm) {
+	// 		.svm_cid = VMADDR_CID_ANY,
+	// 		.svm_family = AF_VSOCK,
+	// 		.svm_port = ntohs(addr_tcp->sin_port)
+	// 	};
+	// 	addr = (const struct sockaddr *)(&addr_vm);
+	// 	addr_len = sizeof(addr_vm);
+	// }
+
 	uk_file_wlock(of->file);
+	struct socket_alloc *al = __containerof(of->file, struct socket_alloc, f);
+	// vsock cannot understand IP, translate it
+	if (al->stub_node.driver) {
+		uk_pr_debug("translate IP addr to VSOCK addr\n");
+		struct sockaddr_in *addr_tcp = (struct sockaddr_in *)addr;
+		addr_vm = (struct sockaddr_vm) {
+			.svm_cid = VMADDR_CID_ANY,
+			.svm_family = AF_VSOCK,
+			.svm_port = ntohs(addr_tcp->sin_port)
+		};
+		addr = (const struct sockaddr *)(&addr_vm);
+		addr_len = sizeof(addr_vm);
+	}
 	ret = posix_socket_bind(of->file, addr, addr_len);
 	uk_file_wunlock(of->file);
 	uk_ofile_release(of);
@@ -608,7 +685,13 @@ UK_SYSCALL_R_DEFINE(int, getsockopt, int, sock, int, level, int, optname,
 	}
 
 	uk_file_rlock(of->file);
-	ret = posix_socket_getsockopt(of->file, level, optname, optval, optlen);
+	struct socket_alloc *al = __containerof(of->file, struct socket_alloc, f);
+	struct posix_socket_node stub = al->stub_node;
+	// vsock cannot handle setsockopt now, fall back to stub
+	if (stub.driver)
+		ret = 0;
+	else
+		ret = posix_socket_getsockopt(of->file, level, optname, optval, optlen);
 	uk_file_runlock(of->file);
 	uk_ofile_release(of);
 
@@ -643,7 +726,13 @@ UK_SYSCALL_R_DEFINE(int, setsockopt, int, sock, int, level, int, optname,
 	}
 
 	uk_file_rlock(of->file);
-	ret = posix_socket_setsockopt(of->file, level, optname, optval, optlen);
+	struct socket_alloc *al = __containerof(of->file, struct socket_alloc, f);
+	struct posix_socket_node stub = al->stub_node;
+	// vsock cannot handle setsockopt now, fall back to stub
+	if (stub.driver)
+		ret = 0;
+	else
+		ret = posix_socket_setsockopt(of->file, level, optname, optval, optlen);
 	uk_file_runlock(of->file);
 	uk_ofile_release(of);
 
@@ -756,6 +845,7 @@ UK_SYSCALL_R_DEFINE(ssize_t, recvfrom, int, sock, void *, buf, size_t, len,
 	unsigned int mode;
 	struct uk_ofile *of;
 
+	uk_pr_err("recvfrom\n");
 	trace_posix_socket_recvfrom(sock, buf, len, flags, from, fromlen);
 
 	if (unlikely(!buf))
@@ -808,6 +898,7 @@ UK_SYSCALL_R_DEFINE(ssize_t, recvmsg, int, sock, struct msghdr *, msg,
 	unsigned int mode;
 	struct uk_ofile *of;
 
+	uk_pr_err("recvmsg\n");
 	trace_posix_socket_recvmsg(sock, msg, flags);
 
 	if (unlikely(!msg || !msg->msg_iov))

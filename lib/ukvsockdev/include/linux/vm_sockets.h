@@ -172,7 +172,7 @@
  */
 
 struct sockaddr_vm {
-	__sa_family_t svm_family;
+	sa_family_t svm_family;
 	unsigned short svm_reserved1;
 	unsigned int svm_port;
 	unsigned int svm_cid;

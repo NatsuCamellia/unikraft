@@ -49,6 +49,8 @@ static int virtio_vsock_reset(struct uk_vsockdev *vd __unused,
 			      struct uk_vsock *sock);
 static int virtio_vsock_destroy(struct uk_vsockdev *vd __unused,
 				struct uk_vsock *sock);
+static int virtio_vsock_send_credit_update(struct uk_vsockdev *vd,
+					   struct uk_vsock *sock);
 
 struct virtio_vsock_accept_entry {
 	struct uk_vsock_accept_entry entry;
@@ -127,6 +129,7 @@ static const struct uk_vsockdev_ops virtio_vsockdev_ops = {
 	.shutdown = virtio_vsock_shutdown,
 	.reset = virtio_vsock_reset,
 	.destroy = virtio_vsock_destroy,
+	.send_credit_update = virtio_vsock_send_credit_update,
 };
 
 static struct uk_alloc *drv_alloc;
@@ -715,6 +718,47 @@ static int virtio_vsockdev_xmit_retry(struct virtio_vsockdev *vv,
 	}
 
 	uk_pr_debug("xmit_retry done: pkt=%p rc=%d\n", pkt, rc);
+
+	return rc;
+}
+
+static int virtio_vsock_send_credit_update(struct uk_vsockdev *vd __unused,
+					   struct uk_vsock *sock)
+{
+	struct virtio_vsock *vs = to_virtio_vsock(sock);
+	struct virtio_vsock_hdr *hdr;
+	struct uk_netbuf *pkt;
+	int rc;
+
+	uk_pr_debug("sock=%p fwd_cnt=%zu buf_alloc=%zu\n",
+		    sock,
+		    uk_vsock_total_processed(&sock->rx),
+		    uk_vsock_buffer_capacity(&sock->rx));
+
+	pkt = uk_netbuf_alloc_buf(drv_alloc, sizeof(*hdr), 8, 0, 0, __NULL);
+	if (unlikely(!pkt)) {
+		uk_pr_err("Unable to allocate memory for credit update\n");
+		return -ENOMEM;
+	}
+
+	pkt->len = sizeof(*hdr);
+	hdr = pkt->data;
+	hdr->op        = VIRTIO_VSOCK_OP_CREDIT_UPDATE;
+	hdr->src_cid   = vs->vs->cid;
+	hdr->src_port  = sock->local_addr.port;
+	hdr->dst_cid   = sock->peer_addr.cid;
+	hdr->dst_port  = sock->peer_addr.port;
+	hdr->fwd_cnt   = uk_vsock_total_processed(&sock->rx);
+	hdr->buf_alloc = uk_vsock_buffer_capacity(&sock->rx);
+	hdr->len       = 0;
+	hdr->flags     = 0;
+	hdr->type      = vs->type;
+
+	rc = virtio_vsockdev_xmit_retry(vs->vs, pkt);
+	if (unlikely(rc)) {
+		uk_pr_err("Unable to send credit update: %d\n", rc);
+		uk_netbuf_free(pkt);
+	}
 
 	return rc;
 }
