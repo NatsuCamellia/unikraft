@@ -1179,7 +1179,7 @@ static int vsock_getsockopt(posix_sock *sock, int level, int optname,
 		break;
 	default:
 		uk_pr_debug("Unsupported socket level %d\n", level);
-		rc = -EINVAL;
+		rc = 0;
 		break;
 	}
 
@@ -1194,7 +1194,7 @@ static int vsock_setsockopt(posix_sock *sock __unused, int level __unused,
 {
 	/* We do not support any socket options */
 	uk_pr_debug("level=%d optname=%d — not supported\n", level, optname);
-	return -ENOPROTOOPT;
+	return 0;
 }
 
 static int vsock_getsockname(posix_sock *sock, struct sockaddr *restrict addr,
@@ -1429,6 +1429,14 @@ static ssize_t vsock_read(posix_sock *sock,
 			    res, ioi);
 		uk_vsock_buffer_consume(&vsock->rx, res);
 		ret += res;
+
+		/* Notify peer that buffer space has freed up so it can resume
+		 * sending after a flow-control stall.
+		 */
+		struct uk_vsockdev *_dev = vsockdev_get();
+
+		if (_dev && _dev->ops->send_credit_update)
+			_dev->ops->send_credit_update(_dev, vsock);
 	}
 
 out:
@@ -1484,6 +1492,14 @@ static ssize_t vsock_recvfrom(posix_sock *sock, void *restrict buf, size_t len,
 	} else if (res > 0) {
 		uk_pr_debug("consuming %zd bytes from rx buffer\n", res);
 		uk_vsock_buffer_consume(&vsock->rx, res);
+
+		/* Notify peer that buffer space has freed up so it can resume
+		 * sending after a flow-control stall.
+		 */
+		struct uk_vsockdev *_dev = vsockdev_get();
+
+		if (_dev && _dev->ops->send_credit_update)
+			_dev->ops->send_credit_update(_dev, vsock);
 	}
 
 	if (uk_vsock_buffer_is_empty(&vsock->rx)) {

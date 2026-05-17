@@ -179,6 +179,19 @@ typedef int (*uk_vsockdev_destroy_func)(struct uk_vsockdev *dev,
 					struct uk_vsock *sock);
 
 /**
+ * Driver callback to send a CREDIT_UPDATE packet to the peer.
+ * Notifies the peer of the current receive buffer state (buf_alloc and
+ * fwd_cnt) so the peer can resume sending after a flow-control stall.
+ * Must be called after consuming data from the socket's receive buffer.
+ *
+ * @param dev The vsock device
+ * @param sock The socket whose credit state should be advertised
+ * @return 0 on success, negative errno code on error
+ */
+typedef int (*uk_vsockdev_credit_update_func)(struct uk_vsockdev *dev,
+					      struct uk_vsock *sock);
+
+/**
  * Driver operation callbacks structure.
  * Contains all the callback functions that drivers must implement
  * to provide vsock functionality.
@@ -193,6 +206,7 @@ struct uk_vsockdev_ops {
 	uk_vsockdev_shutdown_func shutdown;
 	uk_vsockdev_reset_func reset;
 	uk_vsockdev_destroy_func destroy;
+	uk_vsockdev_credit_update_func send_credit_update;
 };
 
 /**
