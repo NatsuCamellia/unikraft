@@ -49,6 +49,8 @@ static int virtio_vsock_reset(struct uk_vsockdev *vd __unused,
 			      struct uk_vsock *sock);
 static int virtio_vsock_destroy(struct uk_vsockdev *vd __unused,
 				struct uk_vsock *sock);
+static int virtio_vsock_send_credit_update(struct uk_vsockdev *vd __unused,
+				struct uk_vsock *sock);
 
 struct virtio_vsock_accept_entry {
 	struct uk_vsock_accept_entry entry;
@@ -127,6 +129,7 @@ static const struct uk_vsockdev_ops virtio_vsockdev_ops = {
 	.shutdown = virtio_vsock_shutdown,
 	.reset = virtio_vsock_reset,
 	.destroy = virtio_vsock_destroy,
+	.send_credit_update = virtio_vsock_send_credit_update
 };
 
 static struct uk_alloc *drv_alloc;
@@ -765,6 +768,13 @@ static int virtio_vsock_work_credit_request(struct virtio_vsockdev *vv,
 	uk_pr_debug("credit update sent successfully\n");
 
 	return 0;
+}
+
+static int virtio_vsock_send_credit_update(struct uk_vsockdev *vd __unused,
+					   struct uk_vsock *sock)
+{
+	struct virtio_vsock *vs = to_virtio_vsock(sock);
+	return virtio_vsock_work_credit_request(vs->vs, vs);
 }
 
 static void virtio_vsockdev_reject_conn(struct virtio_vsock *vv,
