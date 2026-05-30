@@ -239,7 +239,7 @@ int uk_vsock_init(struct uk_vsock *sock, struct uk_alloc *a, int sock_type)
 
 	memset(sock, 0, sizeof(*sock));
 
-	rc = uk_vsock_buffer_init(&sock->rx, a, 256 * 1024);
+	rc = uk_vsock_buffer_init(&sock->rx, a, 4 * 1024 * 1024);
 	if (unlikely(rc)) {
 		uk_pr_err("Failed to initialize vsock buffer: %d\n", rc);
 		return rc;
@@ -507,8 +507,12 @@ int uk_vsock_conn_reset(struct uk_vsock *sock)
 
 	UK_ASSERT(sock->posix_sock);
 	posix_sock_event_clear(sock->posix_sock, EPOLLOUT);
+	/* Also raise EPOLLIN: UKFD_POLLIN excludes the error/hup flags, so a
+	 * reader blocked in uk_file_poll(UKFD_POLLIN) would otherwise never
+	 * wake to observe the reset.
+	 */
 	posix_sock_event_set(sock->posix_sock,
-			     EPOLLERR | EPOLLHUP | EPOLLRDHUP);
+			     EPOLLIN | EPOLLERR | EPOLLHUP | EPOLLRDHUP);
 
 	switch (sock->state) {
 	case UK_VSOCK_STATE_CLOSED:
@@ -566,10 +570,14 @@ int uk_vsock_conn_shutdown(struct uk_vsock *sock, int peer_rx, int peer_tx)
 		sock->tx_shutdown = 1;
 	}
 	if (peer_tx) {
-		/* peer will not send any more data */
-		uk_pr_debug("rx shutdown on sock=%p, setting EPOLLRDHUP\n",
+		/* peer will not send any more data; wake a blocked reader so it
+		 * observes EOF. UKFD_POLLIN does not include EPOLLRDHUP, so the
+		 * reader waiting in uk_file_poll(UKFD_POLLIN) only wakes if we
+		 * also raise EPOLLIN.
+		 */
+		uk_pr_debug("rx shutdown on sock=%p, setting EPOLLIN|EPOLLRDHUP\n",
 			    sock);
-		posix_sock_event_set(sock->posix_sock, EPOLLRDHUP);
+		posix_sock_event_set(sock->posix_sock, EPOLLIN | EPOLLRDHUP);
 		sock->rx_shutdown = 1;
 	}
 	if (sock->rx_shutdown && sock->tx_shutdown) {

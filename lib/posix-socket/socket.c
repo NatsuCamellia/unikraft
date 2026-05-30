@@ -51,6 +51,7 @@
 #include <uk/syscall.h>
 #include <uk/essentials.h>
 #include <errno.h>
+#include <string.h>
 
 #if CONFIG_LIBPOSIX_FDTAB
 #include <uk/posix-fdtab.h>
@@ -110,6 +111,29 @@ uint16_t ntohs(uint16_t n)
 {
 	union { int i; char c; } u = { 1 };
 	return u.c ? bswap_16(n) : n;
+}
+
+/* Translate a VSOCK address (as returned by the vsock driver) back into the
+ * IPv4 address layout the unmodified application expects. The vsock layer
+ * stores the port in host byte order, so we byte-swap it back into the
+ * network-order sin_port field. The address itself is meaningless for vsock,
+ * so we report the wildcard.
+ */
+static void vsock_to_inet_addr(struct sockaddr *restrict addr,
+			       socklen_t *restrict addr_len,
+			       const struct sockaddr_vm *svm)
+{
+	struct sockaddr_in addr_in;
+	socklen_t copy;
+
+	memset(&addr_in, 0, sizeof(addr_in));
+	addr_in.sin_family = AF_INET;
+	addr_in.sin_port = ntohs((uint16_t)svm->svm_port);
+	addr_in.sin_addr.s_addr = 0;
+
+	copy = MIN(*addr_len, (socklen_t)sizeof(addr_in));
+	memcpy(addr, &addr_in, copy);
+	*addr_len = sizeof(addr_in);
 }
 
 #if CONFIG_LIBPOSIX_FDTAB
@@ -320,7 +344,7 @@ struct uk_file *uk_socket_create(int family, int type, int protocol)
 	// if this is a IPv4 socket, we replace it with a VSOCK
 	if (family == AF_INET && type == SOCK_STREAM) {
 		struct posix_socket_driver *vsock_driver = posix_socket_driver_get(AF_VSOCK);
-		void *vsock_data = posix_socket_create(vsock_driver, AF_VSOCK, type, protocol);
+		void *vsock_data = posix_socket_create(vsock_driver, AF_VSOCK, type, 0);
 		if (unlikely(vsock_data && PTRISERR(vsock_data))) {
 			goto out;
 		}
@@ -640,7 +664,27 @@ UK_SYSCALL_R_DEFINE(int, getsockname, int, sock,
 	}
 
 	uk_file_rlock(of->file);
-	ret = posix_socket_getsockname(of->file, addr, addr_len);
+	{
+		struct socket_alloc *al = __containerof(of->file,
+							struct socket_alloc, f);
+
+		/* For an IPv4 socket transparently backed by VSOCK, the driver
+		 * reports a sockaddr_vm. Translate it back so the application
+		 * reads a valid sin_port instead of garbage.
+		 */
+		if (al->stub_node.driver && addr && addr_len) {
+			struct sockaddr_vm addr_vm;
+			socklen_t vm_len = sizeof(addr_vm);
+
+			ret = posix_socket_getsockname(of->file,
+						       (struct sockaddr *)&addr_vm,
+						       &vm_len);
+			if (!ret)
+				vsock_to_inet_addr(addr, addr_len, &addr_vm);
+		} else {
+			ret = posix_socket_getsockname(of->file, addr, addr_len);
+		}
+	}
 	uk_file_runlock(of->file);
 	uk_ofile_release(of);
 
