@@ -1360,13 +1360,29 @@ static __ssz virtio_vsock_send(struct uk_vsockdev *vd __unused,
 	 *       limited by the buffer size.
 	 */
 	pkt_len = MIN(virtio_vsock_peer_rx_free(vs), size);
+	/* Cap the payload so a single packet stays within both limits and let
+	 * the caller send the remainder in a subsequent call:
+	 *   - the host drops RW packets whose payload exceeds
+	 *     VIRTIO_VSOCK_MAX_PKT_BUF_SIZE; and
+	 *   - the whole packet (header + payload) must fit in one netbuf, whose
+	 *     length field is 16-bit, so header + payload must be <= __U16_MAX.
+	 * The second bound is the tighter one given the 44-byte header.
+	 */
+	pkt_len = MIN(pkt_len, VIRTIO_VSOCK_MAX_PKT_BUF_SIZE);
+	pkt_len = MIN(pkt_len,
+		      (__u32)(__U16_MAX - sizeof(struct virtio_vsock_hdr)));
 
 	uk_pr_debug("peer_rx_free=%u requested=%zu effective pkt_len=%u\n",
 		    virtio_vsock_peer_rx_free(vs), size, pkt_len);
 
 	if (pkt_len == 0) {
-		uk_pr_debug("peer RX buffer full, returning EAGAIN\n");
-		return -EAGAIN;
+		/* Peer RX buffer is full. Return 0 so the POSIX layer clears
+		 * EPOLLOUT and the caller blocks until a CREDIT_UPDATE re-arms
+		 * writability; returning -EAGAIN here would leave EPOLLOUT set
+		 * and busy-loop a poll/select based writer.
+		 */
+		uk_pr_debug("peer RX buffer full, returning 0 (would block)\n");
+		return 0;
 	}
 
 	pkt = uk_netbuf_alloc_buf(drv_alloc, pkt_len + sizeof(*hdr), 8,
