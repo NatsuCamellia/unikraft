@@ -239,7 +239,7 @@ int uk_vsock_init(struct uk_vsock *sock, struct uk_alloc *a, int sock_type)
 
 	memset(sock, 0, sizeof(*sock));
 
-	rc = uk_vsock_buffer_init(&sock->rx, a, 256 * 1024);
+	rc = uk_vsock_buffer_init(&sock->rx, a, 4 * 1024 * 1024);
 	if (unlikely(rc)) {
 		uk_pr_err("Failed to initialize vsock buffer: %d\n", rc);
 		return rc;
