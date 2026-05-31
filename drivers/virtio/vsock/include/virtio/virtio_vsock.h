@@ -54,6 +54,12 @@ struct virtio_vsock_hdr {
 #define VIRTIO_VSOCK_TYPE_STREAM	1
 #define VIRTIO_VSOCK_TYPE_SEQPACKET	2
 
+/* Maximum payload the host (vhost-vsock) accepts in a single RW packet.
+ * Larger packets are silently dropped by the host, so the guest must split
+ * its sends accordingly.
+ */
+#define VIRTIO_VSOCK_MAX_PKT_BUF_SIZE	(1024U * 64)
+
 enum virtio_vsock_op {
 	VIRTIO_VSOCK_OP_INVALID = 0,
 
